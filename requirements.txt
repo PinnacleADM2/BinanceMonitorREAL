@@ -1,0 +1,9 @@
+Flask
+Flask-SocketIO
+eventlet
+python-binance
+requests
+pandas
+mplfinance
+numpy
+# python-dotenv # Uncomment if you switch to using .env files for API keys 
