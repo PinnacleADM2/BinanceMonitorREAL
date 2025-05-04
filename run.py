@@ -6,8 +6,19 @@ import atexit # To register cleanup function
 import logging
 from app import create_app
 # Importar funções WebSocket renomeadas
-from app.services.binance_service import start_websocket_listeners, stop_websocket_listeners
+from app.services.binance_service import (
+    start_spot_kline_listeners, stop_spot_kline_listeners, # Para Spot
+    start_futures_listeners, stop_futures_listeners  # Para Futures
+)
 import threading
+
+# Importar símbolos da config
+try:
+    from config import FUTURES_SYMBOLS_AGGTRADE, SPOT_SYMBOLS_KLINES
+except ImportError:
+    logging.error("Não foi possível importar listas de símbolos de config.py. Usando listas vazias.")
+    FUTURES_SYMBOLS_AGGTRADE = []
+    SPOT_SYMBOLS_KLINES = []
 
 # Configuração básica de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,13 +29,25 @@ app = create_app()
 SYMBOLS_TO_MONITOR_AGGTRADE = ['BTCUSDT'] # Lista de símbolos apenas para aggTrade
 websocket_thread = None
 
-def run_websocket():
-    """Função para rodar o listener em uma thread."""
+# --- Threads WebSocket --- #
+spot_websocket_thread = None
+futures_websocket_thread = None
+
+def run_spot_websocket():
+    """Função para rodar o listener Spot Kline em uma thread."""
+    logging.info(f"Thread Spot iniciando listener para {len(SPOT_SYMBOLS_KLINES)} símbolos...")
     try:
-        # Passa a lista de símbolos para aggTrade
-        start_websocket_listeners(SYMBOLS_TO_MONITOR_AGGTRADE)
+        start_spot_kline_listeners(SPOT_SYMBOLS_KLINES)
     except Exception as e:
-        logging.error(f"Erro fatal na thread do WebSocket: {e}")
+        logging.error(f"Erro fatal na thread do WebSocket Spot: {e}", exc_info=True)
+
+def run_futures_websocket():
+    """Função para rodar o listener Futures (AggTrade+Liq) em uma thread."""
+    logging.info(f"Thread Futures iniciando listener para {len(FUTURES_SYMBOLS_AGGTRADE)} aggTrades + Liquidações...")
+    try:
+        start_futures_listeners(FUTURES_SYMBOLS_AGGTRADE)
+    except Exception as e:
+        logging.error(f"Erro fatal na thread do WebSocket Futures: {e}", exc_info=True)
 
 if __name__ == '__main__':
     logging.info("Iniciando aplicação Crypto Monitor...")
@@ -34,27 +57,41 @@ if __name__ == '__main__':
     # Vamos comentar por enquanto, pois estamos iniciando nosso próprio listener.
     # websocket_streams.initialize_websocket_manager()
 
-    # Registrar a função de parada para ser chamada ao sair
-    atexit.register(stop_websocket_listeners) # Usa a função de parada renomeada
-    # A linha abaixo parece ser de uma estrutura antiga, comentar também:
-    # atexit.register(websocket_streams.stop_websocket_manager)
+    # Registrar funções de parada para serem chamadas ao sair
+    atexit.register(stop_spot_kline_listeners)
+    atexit.register(stop_futures_listeners)
+    # Remover registros antigos se houver
+    # atexit.unregister(...) # Se necessário
 
-    # Iniciar o listener WebSocket em uma thread separada
-    logging.info(f"Iniciando listener WebSocket para aggTrade({SYMBOLS_TO_MONITOR_AGGTRADE}) e Liquidações em background...")
-    websocket_thread = threading.Thread(target=run_websocket, daemon=True) # daemon=True permite que o programa saia mesmo se a thread estiver rodando
-    websocket_thread.start()
+    # --- Iniciar Listener SPOT --- #
+    if SPOT_SYMBOLS_KLINES:
+        logging.info(f"Iniciando listener WebSocket SPOT Klines em background...")
+        spot_websocket_thread = threading.Thread(target=run_spot_websocket, name="SpotKlineThread", daemon=True)
+        spot_websocket_thread.start()
+    else:
+        logging.warning("Nenhum símbolo SPOT definido em config.py, listener de Klines não iniciado.")
 
-    # Run the Flask app using SocketIO server
-    print("Starting Flask-SocketIO server with eventlet...")
-    # Nota: Se você não estiver usando Flask-SocketIO ativamente ainda, pode comentar 
-    # a linha socketio.run e descomentar a linha app.run abaixo.
-    socketio.run(app,
-                 host='0.0.0.0', # Ou 127.0.0.1
-                 port=5000,
-                 use_reloader=False, # Importante manter False
-                 debug=False) # Debug False recomendado
-    
-    # Linha original do app.run (manter comentada se usar socketio.run)
-    # app.run(host='127.0.0.1', port=5000, debug=False, use_debugger=False, use_reloader=False)
+    # --- Iniciar Listener FUTURES --- #
+    if FUTURES_SYMBOLS_AGGTRADE: # Inicia mesmo se a lista estiver vazia para pegar liquidações
+        logging.info(f"Iniciando listener WebSocket FUTURES (AggTrade+Liquidation) em background...")
+        futures_websocket_thread = threading.Thread(target=run_futures_websocket, name="FuturesThread", daemon=True)
+        futures_websocket_thread.start()
+    # else: # Poderia logar se nem liquidações fossem desejadas
+        # logging.warning("Nenhum símbolo FUTURES definido em config.py, listener de AggTrade não iniciado (apenas Liquidação global).")
+
+    # --- Iniciar Servidor Flask/SocketIO --- #
+    logging.info("Iniciando servidor Flask-SocketIO...")
+    try:
+        socketio.run(app,
+                     host='0.0.0.0', # Ou 127.0.0.1
+                     port=5000,
+                     use_reloader=False,
+                     debug=False, # Manter False em produção/teste com threads
+                     log_output=True) # Mostrar logs do SocketIO/EngineIO
+    except Exception as e:
+        logging.error(f"Erro ao iniciar servidor Flask-SocketIO: {e}", exc_info=True)
+    finally:
+        logging.info("Aplicação Crypto Monitor encerrada ou encontrou um erro fatal.")
+        # Chamadas atexit cuidarão da limpeza dos listeners
 
     logging.info("Aplicação Crypto Monitor encerrada.") 
